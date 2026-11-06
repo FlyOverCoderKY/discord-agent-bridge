@@ -23,8 +23,14 @@ export interface Config {
   temperature: number;
   maxTokens: number;
   memoryMaxMessages: number;
+  memoryMaxKeys: number;
   rateLimitPerUser: number;
   rateLimitWindowMs: number;
+  rateLimitMaxKeys: number;
+  discordReplyMaxChunks: number;
+  callbackMaxTextChars: number;
+  webSearchMaxCallsPerRound: number;
+  webSearchMaxCallsPerRequest: number;
   braveApiKey: string | null;
   tavilyApiKey: string | null;
   grokBotGatewayUrl: string | null;
@@ -58,6 +64,18 @@ function parseNumber(value: string | undefined, defaultValue: number): number {
   const n = Number(value);
   if (!Number.isFinite(n)) throw new Error(`Invalid number env value: ${value}`);
   return n;
+}
+
+function parsePositiveInteger(
+  value: string | undefined,
+  defaultValue: number,
+  name: string,
+): number {
+  const parsed = parseNumber(value, defaultValue);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function loadSystemPrompt(filePath: string): string {
@@ -164,8 +182,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     temperature: parseNumber(env.TEMPERATURE, 0.7),
     maxTokens: parseNumber(env.MAX_TOKENS, 1024),
     memoryMaxMessages: parseNumber(env.MEMORY_MAX_MESSAGES, 20),
+    memoryMaxKeys: parsePositiveInteger(env.MEMORY_MAX_KEYS, 1_000, "MEMORY_MAX_KEYS"),
     rateLimitPerUser: parseNumber(env.RATE_LIMIT_PER_USER, 5),
     rateLimitWindowMs: parseNumber(env.RATE_LIMIT_WINDOW_MS, 60_000),
+    rateLimitMaxKeys: parsePositiveInteger(
+      env.RATE_LIMIT_MAX_KEYS,
+      10_000,
+      "RATE_LIMIT_MAX_KEYS",
+    ),
+    discordReplyMaxChunks: parsePositiveInteger(
+      env.DISCORD_REPLY_MAX_CHUNKS,
+      8,
+      "DISCORD_REPLY_MAX_CHUNKS",
+    ),
+    callbackMaxTextChars: parsePositiveInteger(
+      env.CALLBACK_MAX_TEXT_CHARS,
+      15_000,
+      "CALLBACK_MAX_TEXT_CHARS",
+    ),
+    webSearchMaxCallsPerRound: parsePositiveInteger(
+      env.WEB_SEARCH_MAX_CALLS_PER_ROUND,
+      2,
+      "WEB_SEARCH_MAX_CALLS_PER_ROUND",
+    ),
+    webSearchMaxCallsPerRequest: parsePositiveInteger(
+      env.WEB_SEARCH_MAX_CALLS_PER_REQUEST,
+      4,
+      "WEB_SEARCH_MAX_CALLS_PER_REQUEST",
+    ),
     braveApiKey: env.BRAVE_API_KEY?.trim() || null,
     tavilyApiKey: env.TAVILY_API_KEY?.trim() || null,
     grokBotGatewayUrl,

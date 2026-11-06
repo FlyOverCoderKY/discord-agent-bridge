@@ -25,7 +25,6 @@ function backendOpts(overrides: Partial<ConstructorParameters<typeof GrokBotBack
     agentId: "agent-from-env",
     timeoutMs: 5_000,
     replyUrl: "http://bridge.example:8788/internal/reply",
-    replyToken: "reply-token",
     pending: new PendingReplyStore(),
     ...overrides,
   };
@@ -34,6 +33,12 @@ function backendOpts(overrides: Partial<ConstructorParameters<typeof GrokBotBack
 function correlationIdFromPrompt(prompt: string): string {
   const match = prompt.match(/"correlationId": "([^"]+)"/);
   if (!match?.[1]) throw new Error("prompt missing correlationId");
+  return match[1];
+}
+
+function capabilityTokenFromPrompt(prompt: string): string {
+  const match = prompt.match(/"authorization": "Bearer ([^"]+)"/);
+  if (!match?.[1]) throw new Error("prompt missing capability token");
   return match[1];
 }
 
@@ -62,7 +67,7 @@ describe("buildGrokBotPrompt", () => {
 
 describe("GrokBotBackend", () => {
   it("POSTs sendPrompt with correlationId and replyUrl, then resolves from the callback", async () => {
-    const pending = new PendingReplyStore();
+    const pending = new PendingReplyStore("reusable-config-secret");
     const calls: Array<{ url: string; init: RequestInit }> = [];
 
     const fetchImpl: typeof fetch = async (url, init) => {
@@ -90,9 +95,16 @@ describe("GrokBotBackend", () => {
     expect(sent.prompt).toContain("http://bridge.example:8788/internal/reply");
     expect(sent.prompt).toContain("where are cooking pots?");
     expect(sent.prompt).toContain("conversationKey: channel:123");
+    expect(sent.prompt).not.toContain("reusable-config-secret");
 
     const correlationId = correlationIdFromPrompt(sent.prompt);
-    await expect(pending.complete(correlationId, "Check houses near traders.")).resolves.toBe("ok");
+    await expect(
+      pending.complete(
+        correlationId,
+        capabilityTokenFromPrompt(sent.prompt),
+        "Check houses near traders.",
+      ),
+    ).resolves.toBe("ok");
     await expect(generatePromise).resolves.toEqual({
       text: "Check houses near traders.",
       delivered: false,
@@ -104,7 +116,6 @@ describe("GrokBotBackend", () => {
     const server = await startReplyServer({
       host: "127.0.0.1",
       port: 0,
-      replyToken: "reply-token",
       pending,
     });
 
@@ -121,11 +132,12 @@ describe("GrokBotBackend", () => {
       await vi.waitFor(() => expect(calls).toHaveLength(1));
 
       const correlationId = correlationIdFromPrompt(calls[0]!);
+      const capabilityToken = capabilityTokenFromPrompt(calls[0]!);
       const res = await fetch(`http://127.0.0.1:${server.port}/internal/reply`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer reply-token",
+          Authorization: `Bearer ${capabilityToken}`,
         },
         body: JSON.stringify({ correlationId, text: "Traders sell pots." }),
       });
@@ -158,9 +170,48 @@ describe("GrokBotBackend", () => {
     });
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     const body = JSON.parse(calls[0]!) as { prompt: string };
-    await pending.complete(correlationIdFromPrompt(body.prompt), "Posted first.");
+    await pending.complete(
+      correlationIdFromPrompt(body.prompt),
+      capabilityTokenFromPrompt(body.prompt),
+      "Posted first.",
+    );
     await expect(generatePromise).resolves.toEqual({ text: "Posted first.", delivered: true });
     expect(delivered).toEqual(["Posted first."]);
+  });
+
+  it("lets an authenticated delivery finish when the gateway request fails late", async () => {
+    const pending = new PendingReplyStore();
+    let prompt = "";
+    let rejectGateway: ((error: Error) => void) | undefined;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { prompt: string };
+      prompt = body.prompt;
+      return new Promise<Response>((_resolve, reject) => {
+        rejectGateway = reject;
+      });
+    };
+    let finishDelivery: (() => void) | undefined;
+    const grok = new GrokBotBackend(backendOpts({ pending, fetchImpl }));
+    const generatePromise = grok.generate({
+      ...request,
+      deliverReply: async () =>
+        new Promise<void>((resolve) => {
+          finishDelivery = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(prompt).not.toBe(""));
+
+    const completePromise = pending.complete(
+      correlationIdFromPrompt(prompt),
+      capabilityTokenFromPrompt(prompt),
+      "delivered",
+    );
+    await vi.waitFor(() => expect(finishDelivery).toBeDefined());
+    rejectGateway?.(new Error("late gateway failure"));
+    finishDelivery?.();
+
+    await expect(completePromise).resolves.toBe("ok");
+    await expect(generatePromise).resolves.toEqual({ text: "delivered", delivered: true });
   });
 
   it("times out when the agent never callbacks", async () => {

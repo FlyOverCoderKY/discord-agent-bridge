@@ -1,13 +1,11 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { AgentCallbackError, type PendingReplyStore } from "./pendingReplies.js";
 
 export interface ReplyServerOptions {
   host: string;
   port: number;
-  /** Fail closed when unset or empty — every request is 401. */
-  replyToken: string | null;
   pending: PendingReplyStore;
+  maxTextChars?: number;
 }
 
 export interface StartedReplyServer {
@@ -17,6 +15,7 @@ export interface StartedReplyServer {
 }
 
 const MAX_BODY_BYTES = 1_000_000;
+export const DEFAULT_MAX_CALLBACK_TEXT_CHARS = 15_000;
 
 interface ReplyBody {
   correlationId?: unknown;
@@ -45,34 +44,31 @@ function extractBearer(header: string | undefined): string | null {
   return match?.[1] ?? null;
 }
 
-function tokenMatches(provided: string, expected: string): boolean {
-  const a = createHash("sha256").update(provided).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
-}
-
-function authorize(req: IncomingMessage, expected: string | null): boolean {
-  if (!expected) return false;
-  const provided = extractBearer(headerValue(req, "authorization"));
-  if (!provided) return false;
-  return tokenMatches(provided, expected);
-}
-
 function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    req.on("data", (chunk: Buffer) => {
+    let settled = false;
+
+    const onData = (chunk: Buffer) => {
       size += chunk.length;
       if (size > maxBytes) {
-        req.destroy();
+        settled = true;
+        chunks.length = 0;
+        req.off("data", onData);
+        req.resume();
         reject(new Error("payload_too_large"));
         return;
       }
       chunks.push(chunk);
+    };
+    req.on("data", onData);
+    req.on("end", () => {
+      if (!settled) resolve(Buffer.concat(chunks).toString("utf8"));
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("error", (error) => {
+      if (!settled) reject(error);
+    });
   });
 }
 
@@ -90,7 +86,8 @@ async function handleReply(
     return;
   }
 
-  if (!authorize(req, opts.replyToken)) {
+  const capabilityToken = extractBearer(headerValue(req, "authorization"));
+  if (!capabilityToken) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -98,8 +95,11 @@ async function handleReply(
   let raw: string;
   try {
     raw = await readBody(req, MAX_BODY_BYTES);
-  } catch {
-    sendJson(res, 400, { error: "invalid_body" });
+  } catch (err) {
+    const tooLarge = err instanceof Error && err.message === "payload_too_large";
+    sendJson(res, tooLarge ? 413 : 400, {
+      error: tooLarge ? "payload_too_large" : "invalid_body",
+    });
     return;
   }
 
@@ -125,20 +125,51 @@ async function handleReply(
     return;
   }
 
-  if (!opts.pending.has(correlationId)) {
+  const authResult = opts.pending.verifyCapability(correlationId, capabilityToken);
+  if (authResult === "missing") {
     sendJson(res, 404, { error: "unknown_correlation_id" });
+    return;
+  }
+  if (authResult === "unauthorized") {
+    sendJson(res, 401, { error: "unauthorized" });
+    return;
+  }
+
+  const maxTextChars = opts.maxTextChars ?? DEFAULT_MAX_CALLBACK_TEXT_CHARS;
+  if (text.length > maxTextChars) {
+    sendJson(res, 413, { error: "reply_too_large" });
     return;
   }
 
   if (errorMessage && !text.trim()) {
-    opts.pending.fail(correlationId, new AgentCallbackError(errorMessage));
+    const result = opts.pending.failCallback(
+      correlationId,
+      capabilityToken,
+      new AgentCallbackError(errorMessage),
+    );
+    if (result === "missing") {
+      sendJson(res, 404, { error: "unknown_correlation_id" });
+      return;
+    }
+    if (result === "unauthorized") {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    if (result === "delivery_failed") {
+      sendJson(res, 503, { error: "delivery_failed" });
+      return;
+    }
     sendJson(res, 200, { ok: true });
     return;
   }
 
-  const result = await opts.pending.complete(correlationId, text);
+  const result = await opts.pending.complete(correlationId, capabilityToken, text);
   if (result === "missing") {
     sendJson(res, 404, { error: "unknown_correlation_id" });
+    return;
+  }
+  if (result === "unauthorized") {
+    sendJson(res, 401, { error: "unauthorized" });
     return;
   }
   if (result === "delivery_failed") {
@@ -150,6 +181,11 @@ async function handleReply(
 }
 
 export async function startReplyServer(opts: ReplyServerOptions): Promise<StartedReplyServer> {
+  const maxTextChars = opts.maxTextChars ?? DEFAULT_MAX_CALLBACK_TEXT_CHARS;
+  if (!Number.isInteger(maxTextChars) || maxTextChars < 1) {
+    throw new Error("maxTextChars must be a positive integer");
+  }
+
   const server: Server = createServer((req, res) => {
     const url = req.url?.split("?")[0] ?? "";
     if (url !== "/internal/reply") {

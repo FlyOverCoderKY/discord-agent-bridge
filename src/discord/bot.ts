@@ -85,7 +85,11 @@ export function attachMessageHandler(
   config: Config,
   backend: AgentBackend,
 ): void {
-  const limiter = new RateLimiter(config.rateLimitPerUser, config.rateLimitWindowMs);
+  const limiter = new RateLimiter(
+    config.rateLimitPerUser,
+    config.rateLimitWindowMs,
+    config.rateLimitMaxKeys,
+  );
 
   client.on("messageCreate", async (message: OmitPartialGroupDMChannel<Message>) => {
     try {
@@ -169,11 +173,11 @@ async function handleMessage(
         threadName: ctx.threadName,
         channelTopic: ctx.channelTopic,
         guildName: ctx.guildName,
-        deliverReply: (text) => sendSplitReply(message, text),
+        deliverReply: (text) => sendSplitReply(message, text, config.discordReplyMaxChunks),
       }),
     );
     if (!result.delivered) {
-      await sendSplitReply(message, result.text);
+      await sendSplitReply(message, result.text, config.discordReplyMaxChunks);
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
