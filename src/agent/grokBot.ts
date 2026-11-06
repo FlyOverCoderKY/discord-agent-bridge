@@ -9,7 +9,6 @@ export interface GrokBotBackendOptions {
   agentId: string;
   timeoutMs: number;
   replyUrl: string;
-  replyToken: string;
   pending: PendingReplyStore;
   fetchImpl?: typeof fetch;
   sendPromptTimeoutMs?: number;
@@ -33,12 +32,12 @@ export function buildGrokBotPrompt(
   request: AgentRequest,
   correlationId: string,
   replyUrl: string,
-  replyToken: string,
+  capabilityToken: string,
 ): string {
   const callback = {
     correlationId,
     replyUrl,
-    authorization: `Bearer ${replyToken}`,
+    authorization: `Bearer ${capabilityToken}`,
     httpMethod: "POST",
     contentType: "application/json",
     body: {
@@ -104,28 +103,39 @@ export class GrokBotBackend implements AgentBackend {
 
   async generate(request: AgentRequest): Promise<AgentResponse> {
     const correlationId = randomUUID();
+    const registration = this.opts.pending.register(
+      correlationId,
+      this.opts.timeoutMs,
+      request.deliverReply,
+    );
     const prompt = buildGrokBotPrompt(
       request,
       correlationId,
       this.opts.replyUrl,
-      this.opts.replyToken,
-    );
-    const replyPromise = this.opts.pending.register(
-      correlationId,
-      this.opts.timeoutMs,
-      request.deliverReply,
+      registration.capabilityToken,
     );
 
     try {
       await this.sendPrompt(prompt);
     } catch (err) {
-      this.opts.pending.fail(correlationId, err instanceof Error ? err : new Error(String(err)));
-      await replyPromise.catch(() => undefined);
-      throw mapGenerateError(err);
+      const failed = this.opts.pending.fail(
+        correlationId,
+        err instanceof Error ? err : new Error(String(err)),
+      );
+      if (failed) {
+        await registration.reply.catch(() => undefined);
+        throw mapGenerateError(err);
+      }
+      try {
+        const text = await registration.reply;
+        return { text, delivered: Boolean(request.deliverReply) };
+      } catch (callbackError) {
+        throw mapGenerateError(callbackError);
+      }
     }
 
     try {
-      const text = await replyPromise;
+      const text = await registration.reply;
       return { text, delivered: Boolean(request.deliverReply) };
     } catch (err) {
       throw mapGenerateError(err);

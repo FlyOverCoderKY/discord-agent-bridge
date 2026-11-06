@@ -87,7 +87,7 @@ flowchart LR
 | `BRIDGE_HTTP_HOST` | no | Default `0.0.0.0`. Colocated host process: `127.0.0.1` |
 | `BRIDGE_HTTP_PORT` | no | Default `8788` |
 | `BRIDGE_PUBLIC_URL` | if grok-bot | Reachable from the Grok Bot computer. Colocated host process: `http://127.0.0.1:8788`. When the bridge runs on a different machine, that machine's `localhost` is not the bridge. |
-| `BRIDGE_REPLY_TOKEN` | if grok-bot | Bearer for `POST /internal/reply` |
+| `BRIDGE_REPLY_TOKEN` | if grok-bot | Server-side key for per-request callback capabilities |
 | `API_BASE_URL` | if openai | e.g. `https://api.x.ai/v1` |
 | `API_KEY` | if openai | Provider API key |
 | `MODEL` | if openai | Model id |

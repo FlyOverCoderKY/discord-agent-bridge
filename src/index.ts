@@ -16,19 +16,22 @@ function createOpenAiBackend(config: ReturnType<typeof loadConfig>): AgentBacken
     temperature: config.temperature,
     maxTokens: config.maxTokens,
     memoryMaxMessages: config.memoryMaxMessages,
+    memoryMaxKeys: config.memoryMaxKeys,
+    maxWebSearchCallsPerRound: config.webSearchMaxCallsPerRound,
+    maxWebSearchCallsPerRequest: config.webSearchMaxCallsPerRequest,
     braveApiKey: config.braveApiKey,
     tavilyApiKey: config.tavilyApiKey,
   });
 }
 
 async function createGrokBotBackend(config: ReturnType<typeof loadConfig>): Promise<AgentBackend> {
-  const pending = new PendingReplyStore();
+  const pending = new PendingReplyStore(config.bridgeReplyToken!);
   const replyUrl = joinUrl(config.bridgePublicUrl!, "/internal/reply");
   const server = await startReplyServer({
     host: config.bridgeHttpHost,
     port: config.bridgeHttpPort,
-    replyToken: config.bridgeReplyToken,
     pending,
+    maxTextChars: config.callbackMaxTextChars,
   });
   console.log(`[bridge] reply endpoint listening on ${server.host}:${server.port} path=/internal/reply`);
   return new GrokBotBackend({
@@ -37,7 +40,6 @@ async function createGrokBotBackend(config: ReturnType<typeof loadConfig>): Prom
     agentId: config.grokBotAgentId!,
     timeoutMs: config.grokBotTimeoutMs,
     replyUrl,
-    replyToken: config.bridgeReplyToken!,
     pending,
   });
 }

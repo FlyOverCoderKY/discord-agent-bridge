@@ -42,6 +42,12 @@ describe("loadConfig", () => {
     expect(cfg.systemPrompt).toMatch(/model `m`/);
     expect(cfg.temperature).toBe(0.7);
     expect(cfg.maxTokens).toBe(1024);
+    expect(cfg.memoryMaxKeys).toBe(1_000);
+    expect(cfg.rateLimitMaxKeys).toBe(10_000);
+    expect(cfg.discordReplyMaxChunks).toBe(8);
+    expect(cfg.callbackMaxTextChars).toBe(15_000);
+    expect(cfg.webSearchMaxCallsPerRound).toBe(2);
+    expect(cfg.webSearchMaxCallsPerRequest).toBe(4);
     expect(cfg.bridgeHttpHost).toBe("0.0.0.0");
     expect(cfg.bridgeHttpPort).toBe(8788);
     expect(cfg.grokBotTimeoutMs).toBe(120_000);
@@ -167,5 +173,28 @@ describe("loadConfig", () => {
     expect(cfg.allowedGuilds).toEqual(["g1", "g2"]);
     expect(cfg.allowDms).toBe(true);
     expect(cfg.dmOnly).toBe(true);
+  });
+
+  it("parses hardening bounds and rejects invalid values", () => {
+    const soul = writeSoul();
+    const cfg = loadConfig({
+      ...grokBotEnv(soul),
+      MEMORY_MAX_KEYS: "25",
+      RATE_LIMIT_MAX_KEYS: "50",
+      DISCORD_REPLY_MAX_CHUNKS: "6",
+      CALLBACK_MAX_TEXT_CHARS: "12000",
+      WEB_SEARCH_MAX_CALLS_PER_ROUND: "1",
+      WEB_SEARCH_MAX_CALLS_PER_REQUEST: "3",
+    });
+    expect(cfg.memoryMaxKeys).toBe(25);
+    expect(cfg.rateLimitMaxKeys).toBe(50);
+    expect(cfg.discordReplyMaxChunks).toBe(6);
+    expect(cfg.callbackMaxTextChars).toBe(12_000);
+    expect(cfg.webSearchMaxCallsPerRound).toBe(1);
+    expect(cfg.webSearchMaxCallsPerRequest).toBe(3);
+
+    expect(() => loadConfig(grokBotEnv(soul, { DISCORD_REPLY_MAX_CHUNKS: "0" }))).toThrow(
+      /DISCORD_REPLY_MAX_CHUNKS/,
+    );
   });
 });

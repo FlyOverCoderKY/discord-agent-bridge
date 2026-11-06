@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createConnection } from "node:net";
 import { PendingReplyStore, ReplyTimeoutError } from "./pendingReplies.js";
 import { startReplyServer, type StartedReplyServer } from "./replyServer.js";
 
@@ -6,13 +7,13 @@ const TOKEN = "test-reply-token";
 
 async function listen(
   pending: PendingReplyStore,
-  replyToken: string | null = TOKEN,
+  maxTextChars?: number,
 ): Promise<StartedReplyServer> {
   return startReplyServer({
     host: "127.0.0.1",
     port: 0,
-    replyToken,
     pending,
+    maxTextChars,
   });
 }
 
@@ -64,6 +65,7 @@ describe("POST /internal/reply", () => {
     const pending = new PendingReplyStore();
     const server = await listen(pending);
     servers.push(server);
+    const registration = pending.register("c", 5_000);
 
     const res = await postReply(server, {
       token: "wrong-token",
@@ -71,18 +73,8 @@ describe("POST /internal/reply", () => {
     });
     expect(res.status).toBe(401);
     expect(res.json.error).toBe("unauthorized");
-  });
-
-  it("returns 401 when the server token is unset (fail closed)", async () => {
-    const pending = new PendingReplyStore();
-    const server = await listen(pending, null);
-    servers.push(server);
-
-    const res = await postReply(server, {
-      token: "anything",
-      body: { correlationId: "c", text: "hi" },
-    });
-    expect(res.status).toBe(401);
+    pending.fail("c", new Error("test cleanup"));
+    await expect(registration.reply).rejects.toThrow("test cleanup");
   });
 
   it("returns 400 when required fields are missing", async () => {
@@ -117,10 +109,11 @@ describe("POST /internal/reply", () => {
     const server = await listen(pending);
     servers.push(server);
 
-    const waiter = pending.register("expired", 20);
-    await expect(waiter).rejects.toBeInstanceOf(ReplyTimeoutError);
+    const registration = pending.register("expired", 20);
+    await expect(registration.reply).rejects.toBeInstanceOf(ReplyTimeoutError);
 
     const res = await postReply(server, {
+      token: registration.capabilityToken,
       body: { correlationId: "expired", text: "too late" },
     });
     expect(res.status).toBe(404);
@@ -131,14 +124,15 @@ describe("POST /internal/reply", () => {
     const server = await listen(pending);
     servers.push(server);
 
-    const waiter = pending.register("corr-1", 5_000);
+    const registration = pending.register("corr-1", 5_000);
     const res = await postReply(server, {
+      token: registration.capabilityToken,
       body: { correlationId: "corr-1", text: "Pots are in houses and trader inventories." },
     });
 
     expect(res.status).toBe(200);
     expect(res.json.ok).toBe(true);
-    await expect(waiter).resolves.toBe("Pots are in houses and trader inventories.");
+    await expect(registration.reply).resolves.toBe("Pots are in houses and trader inventories.");
     expect(pending.has("corr-1")).toBe(false);
   });
 
@@ -148,12 +142,13 @@ describe("POST /internal/reply", () => {
     servers.push(server);
 
     let attempts = 0;
-    const waiter = pending.register("corr-retry", 5_000, async () => {
+    const registration = pending.register("corr-retry", 5_000, async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("discord 502");
     });
 
     const first = await postReply(server, {
+      token: registration.capabilityToken,
       body: { correlationId: "corr-retry", text: "hello from Discord" },
     });
     expect(first.status).toBe(503);
@@ -161,7 +156,7 @@ describe("POST /internal/reply", () => {
     expect(pending.has("corr-retry")).toBe(true);
 
     let settled = false;
-    void waiter.then(
+    void registration.reply.then(
       () => {
         settled = true;
       },
@@ -173,12 +168,71 @@ describe("POST /internal/reply", () => {
     expect(settled).toBe(false);
 
     const second = await postReply(server, {
+      token: registration.capabilityToken,
       body: { correlationId: "corr-retry", text: "hello from Discord" },
     });
     expect(second.status).toBe(200);
     expect(second.json.ok).toBe(true);
-    await expect(waiter).resolves.toBe("hello from Discord");
+    await expect(registration.reply).resolves.toBe("hello from Discord");
     expect(attempts).toBe(2);
     expect(pending.has("corr-retry")).toBe(false);
+  });
+
+  it("rejects oversized callback text without consuming the capability", async () => {
+    const pending = new PendingReplyStore();
+    const server = await listen(pending, 12);
+    servers.push(server);
+    const registration = pending.register("bounded", 5_000);
+
+    const oversized = await postReply(server, {
+      token: registration.capabilityToken,
+      body: { correlationId: "bounded", text: "x".repeat(13) },
+    });
+    expect(oversized.status).toBe(413);
+    expect(oversized.json.error).toBe("reply_too_large");
+
+    const valid = await postReply(server, {
+      token: registration.capabilityToken,
+      body: { correlationId: "bounded", text: "fits" },
+    });
+    expect(valid.status).toBe(200);
+    await expect(registration.reply).resolves.toBe("fits");
+  });
+
+  it("returns 413 as soon as the request body exceeds the byte limit", async () => {
+    const pending = new PendingReplyStore();
+    const server = await listen(pending);
+    servers.push(server);
+
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = createConnection({ host: "127.0.0.1", port: server.port });
+      let received = "";
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error("timed out waiting for early 413"));
+      }, 2_000);
+      socket.on("connect", () => {
+        const body = "x".repeat(1_000_001);
+        socket.write(
+          `POST /internal/reply HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test\r\nContent-Length: ${body.length + 1}\r\nConnection: close\r\n\r\n`,
+        );
+        socket.write(body);
+      });
+      socket.on("data", (chunk) => {
+        received += chunk.toString("utf8");
+        if (received.includes(" 413 ")) {
+          clearTimeout(timer);
+          socket.destroy();
+          resolve(received);
+        }
+      });
+      socket.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+
+    expect(response).toContain("HTTP/1.1 413");
+    expect(response).toContain("payload_too_large");
   });
 });

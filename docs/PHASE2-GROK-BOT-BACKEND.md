@@ -43,7 +43,7 @@ flowchart LR
 1. Discord message passes access control.
 2. `GrokBotBackend.generate()` creates a `correlationId`, registers a pending waiter, and `POST`s `sendPrompt` to `GROK_BOT_GATEWAY_URL`.
 3. The prompt includes a machine-readable `DISCORD_BRIDGE_REPLY` block plus the human Discord message and `AgentRequest` context.
-4. The Grok Bot agent `POST`s `{ correlationId, text }` to `BRIDGE_PUBLIC_URL/internal/reply` with `Authorization: Bearer <BRIDGE_REPLY_TOKEN>`.
+4. The Grok Bot agent `POST`s `{ correlationId, text }` to `BRIDGE_PUBLIC_URL/internal/reply` with the one-time bearer capability from that request's prompt.
 5. The bridge looks up the pending request, posts `text` to the matching Discord channel/thread (same ~1900 split as existing replies), then resolves `generate()`.
 6. If nothing arrives within `GROK_BOT_TIMEOUT_MS` (default 120s), `generate()` fails so Discord is not stuck typing.
 
@@ -54,14 +54,14 @@ flowchart LR
 | Rule | Behavior |
 |------|----------|
 | Listen | `BRIDGE_HTTP_HOST` / `BRIDGE_HTTP_PORT` (defaults `0.0.0.0` / `8788`) |
-| Auth | `Authorization: Bearer <BRIDGE_REPLY_TOKEN>` — **fail closed** if unset or wrong → 401 |
+| Auth | `Authorization: Bearer <per-request capability>` — **fail closed** if missing or wrong → 401 |
 | Body | `{ "correlationId": string, "text": string }` (`error` optional) |
 | Unknown / expired id | 404 |
 | Missing fields | 400 |
 | Discord delivery failure | 503 `{ "error": "delivery_failed" }` — pending entry kept for retry |
 | Success | 200 `{ "ok": true }` |
 
-This is **not** an unauthenticated public webhook. Do not log `BRIDGE_REPLY_TOKEN` or `GROK_BOT_TOKEN`.
+This is **not** an unauthenticated public webhook. `BRIDGE_REPLY_TOKEN` remains server-side and protects the one-time capabilities. Do not log it, the capabilities, or `GROK_BOT_TOKEN`.
 
 `replyUrl` given to the agent is `BRIDGE_PUBLIC_URL + /internal/reply`. That URL must be reachable from the Grok Bot computer. Two topologies:
 
@@ -86,7 +86,7 @@ This is **not** an unauthenticated public webhook. Do not log `BRIDGE_REPLY_TOKE
 | `BRIDGE_HTTP_HOST` | no | Default `0.0.0.0`. Colocated host process: `127.0.0.1` |
 | `BRIDGE_HTTP_PORT` | no | Default `8788` (Compose maps `${BRIDGE_HTTP_PORT:-8788}:${BRIDGE_HTTP_PORT:-8788}`) |
 | `BRIDGE_PUBLIC_URL` | yes | URL the Grok Bot computer uses to reach the bridge. Colocated host process: `http://127.0.0.1:8788` |
-| `BRIDGE_REPLY_TOKEN` | yes | Shared secret for the callback (generate locally; do not commit) |
+| `BRIDGE_REPLY_TOKEN` | yes | Server-side capability key (generate locally; do not commit or place in prompts) |
 
 OpenAI-compatible remains the default. grok-bot fails closed if required vars are missing.
 
@@ -126,7 +126,7 @@ The bridge embeds a JSON block between `---BEGIN DISCORD_BRIDGE_REPLY---` / `---
 
 - `correlationId`
 - `replyUrl`
-- `authorization` (`Bearer <BRIDGE_REPLY_TOKEN>`)
+- `authorization` (`Bearer <one-time request capability>`)
 - `httpMethod` / `contentType` / example `body`
 
 Plus Discord context already on `AgentRequest`: `conversationKey`, `channelName`, `threadName`, `channelTopic`, `guildName`, `authorDisplayName`, `content`.

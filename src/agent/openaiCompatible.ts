@@ -16,10 +16,14 @@ export interface OpenAICompatibleOptions {
   temperature: number;
   maxTokens: number;
   memoryMaxMessages: number;
+  memoryMaxKeys?: number;
   braveApiKey?: string | null;
   tavilyApiKey?: string | null;
   fetchImpl?: typeof fetch;
   maxToolRounds?: number;
+  maxWebSearchCallsPerRound?: number;
+  maxWebSearchCallsPerRequest?: number;
+  webSearchProviders?: WebSearchProvider[];
 }
 
 interface ChatCompletionChoice {
@@ -42,15 +46,27 @@ export class OpenAICompatibleBackend implements AgentBackend {
   private readonly providers: WebSearchProvider[];
   private readonly fetchImpl: typeof fetch;
   private readonly maxToolRounds: number;
+  private readonly maxWebSearchCallsPerRound: number;
+  private readonly maxWebSearchCallsPerRequest: number;
 
   constructor(private readonly opts: OpenAICompatibleOptions) {
-    this.memory = new ConversationMemory(opts.memoryMaxMessages);
-    this.providers = createWebSearchProviders({
-      braveApiKey: opts.braveApiKey,
-      tavilyApiKey: opts.tavilyApiKey,
-    });
+    this.memory = new ConversationMemory(opts.memoryMaxMessages, opts.memoryMaxKeys);
+    this.providers =
+      opts.webSearchProviders ??
+      createWebSearchProviders({
+        braveApiKey: opts.braveApiKey,
+        tavilyApiKey: opts.tavilyApiKey,
+      });
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.maxToolRounds = opts.maxToolRounds ?? 3;
+    this.maxWebSearchCallsPerRound = opts.maxWebSearchCallsPerRound ?? 2;
+    this.maxWebSearchCallsPerRequest = opts.maxWebSearchCallsPerRequest ?? 4;
+    if (!Number.isInteger(this.maxWebSearchCallsPerRound) || this.maxWebSearchCallsPerRound < 1) {
+      throw new Error("maxWebSearchCallsPerRound must be a positive integer");
+    }
+    if (!Number.isInteger(this.maxWebSearchCallsPerRequest) || this.maxWebSearchCallsPerRequest < 1) {
+      throw new Error("maxWebSearchCallsPerRequest must be a positive integer");
+    }
   }
 
   async generate(request: AgentRequest): Promise<AgentResponse> {
@@ -70,6 +86,7 @@ export class OpenAICompatibleBackend implements AgentBackend {
 
     const tools = webSearchToolDefinitions(this.providers);
     let rounds = 0;
+    let webSearchCallsThisRequest = 0;
 
     while (rounds < this.maxToolRounds) {
       rounds += 1;
@@ -82,6 +99,7 @@ export class OpenAICompatibleBackend implements AgentBackend {
 
       const toolCalls = message.tool_calls ?? [];
       if (toolCalls.length > 0) {
+        let webSearchCallsThisRound = 0;
         messages.push({
           role: "assistant",
           content: message.content ?? "",
@@ -91,7 +109,19 @@ export class OpenAICompatibleBackend implements AgentBackend {
         for (const call of toolCalls) {
           let toolResult: string;
           if (call.function.name === "web_search") {
-            toolResult = await runWebSearchTool(this.providers, call.function.arguments);
+            if (webSearchCallsThisRound >= this.maxWebSearchCallsPerRound) {
+              toolResult = JSON.stringify({
+                error: "web_search call budget exceeded for this round",
+              });
+            } else if (webSearchCallsThisRequest >= this.maxWebSearchCallsPerRequest) {
+              toolResult = JSON.stringify({
+                error: "web_search call budget exceeded for this request",
+              });
+            } else {
+              webSearchCallsThisRound += 1;
+              webSearchCallsThisRequest += 1;
+              toolResult = await runWebSearchTool(this.providers, call.function.arguments);
+            }
           } else {
             toolResult = JSON.stringify({ error: `unknown tool: ${call.function.name}` });
           }

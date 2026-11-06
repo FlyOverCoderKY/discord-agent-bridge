@@ -28,4 +28,16 @@ describe("splitMessage", () => {
     expect(chunks.join("")).toBe(text);
     expect(chunks.every((c) => c.length <= 20)).toBe(true);
   });
+
+  it("caps chunk fan-out and marks the truncated final chunk", () => {
+    const chunks = splitMessage("X".repeat(200), 40, 3);
+    expect(chunks).toHaveLength(3);
+    expect(chunks[2]).toContain("[Reply truncated.]");
+    expect(chunks.every((chunk) => chunk.length <= 40)).toBe(true);
+  });
+
+  it("rejects non-positive split bounds", () => {
+    expect(() => splitMessage("hello", 0)).toThrow(/positive integer/);
+    expect(() => splitMessage("hello", 10, 0)).toThrow(/positive integer/);
+  });
 });

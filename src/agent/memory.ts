@@ -21,12 +21,23 @@ export interface ChatMessage {
 export class ConversationMemory {
   private readonly store = new Map<string, ChatMessage[]>();
 
-  constructor(private readonly maxMessages: number) {
-    if (maxMessages < 1) throw new Error("maxMessages must be >= 1");
+  constructor(
+    private readonly maxMessages: number,
+    private readonly maxKeys = 1_000,
+  ) {
+    if (!Number.isInteger(maxMessages) || maxMessages < 1) {
+      throw new Error("maxMessages must be a positive integer");
+    }
+    if (!Number.isInteger(maxKeys) || maxKeys < 1) {
+      throw new Error("maxKeys must be a positive integer");
+    }
   }
 
   get(key: string): ChatMessage[] {
-    return [...(this.store.get(key) ?? [])];
+    const list = this.store.get(key);
+    if (!list) return [];
+    this.touch(key, list);
+    return [...list];
   }
 
   append(key: string, message: ChatMessage): void {
@@ -35,11 +46,25 @@ export class ConversationMemory {
     while (list.length > this.maxMessages) {
       list.shift();
     }
-    this.store.set(key, list);
+    this.touch(key, list);
+    while (this.store.size > this.maxKeys) {
+      const oldestKey = this.store.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      this.store.delete(oldestKey);
+    }
   }
 
   clear(key?: string): void {
     if (key === undefined) this.store.clear();
     else this.store.delete(key);
+  }
+
+  get size(): number {
+    return this.store.size;
+  }
+
+  private touch(key: string, messages: ChatMessage[]): void {
+    this.store.delete(key);
+    this.store.set(key, messages);
   }
 }

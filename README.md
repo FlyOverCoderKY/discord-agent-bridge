@@ -95,15 +95,21 @@ docker compose up --build
 | `BRIDGE_HTTP_HOST` | no | Default `0.0.0.0`. Colocated host process: bind `127.0.0.1` so the callback is localhost-only. |
 | `BRIDGE_HTTP_PORT` | no | Default `8788`. Compose maps host and container to this port (`${BRIDGE_HTTP_PORT:-8788}:${BRIDGE_HTTP_PORT:-8788}`) |
 | `BRIDGE_PUBLIC_URL` | if grok-bot | URL the **Grok Bot computer** uses to reach this bridge. Colocated host process: `http://127.0.0.1:8788`. When the bridge runs on a different machine, that machine's `localhost` is not the bridge. |
-| `BRIDGE_REPLY_TOKEN` | if grok-bot | Shared secret for `Authorization: Bearer` on `POST /internal/reply` (password) |
+| `BRIDGE_REPLY_TOKEN` | if grok-bot | Server-side key used to protect per-request callback capabilities (password; never sent in prompts) |
+| `CALLBACK_MAX_TEXT_CHARS` | no | Default `15000`. Reject larger Grok Bot callback replies before Discord delivery |
+| `DISCORD_REPLY_MAX_CHUNKS` | no | Default `8`. Maximum Discord messages sent for one generated reply; longer replies are truncated with a marker |
 | `SYSTEM_PROMPT_FILE` | no | Default `SOUL.md` (neutral); swap for your agent persona |
 | `TEMPERATURE` | no | Default `0.7` |
 | `MAX_TOKENS` | no | Default `1024` |
 | `MEMORY_MAX_MESSAGES` | no | Default `20` (per channel/thread key) |
+| `MEMORY_MAX_KEYS` | no | Default `1000`. Least-recently-used conversation keys are evicted above this cap |
 | `RATE_LIMIT_PER_USER` | no | Default `5` / window |
 | `RATE_LIMIT_WINDOW_MS` | no | Default `60000` |
+| `RATE_LIMIT_MAX_KEYS` | no | Default `10000`. New keys fail closed while this many rate-limit buckets remain active |
 | `BRAVE_API_KEY` | no | Enables Brave web search tool |
 | `TAVILY_API_KEY` | no | Enables Tavily web search tool |
+| `WEB_SEARCH_MAX_CALLS_PER_ROUND` | no | Default `2` web searches in one model tool round |
+| `WEB_SEARCH_MAX_CALLS_PER_REQUEST` | no | Default `4` web searches for one Discord request |
 
 Access control fails closed: if `DISCORD_ALLOW_ALL_USERS` is false and both user/role allowlists are empty, nobody is served.
 
@@ -116,7 +122,7 @@ Web search tools are registered **only** when at least one of `BRAVE_API_KEY` / 
 There is no official Discord plugin. The working community path is:
 
 1. Bridge `POST`s `{ agentId, prompt }` to `GROK_BOT_GATEWAY_URL/api/sendPrompt` (wakes the agent; does **not** return the reply).
-2. The prompt includes a machine-readable block: `correlationId`, `replyUrl` (`BRIDGE_PUBLIC_URL/internal/reply`), and how to send `Authorization: Bearer <BRIDGE_REPLY_TOKEN>`.
+2. The prompt includes a machine-readable block: `correlationId`, `replyUrl` (`BRIDGE_PUBLIC_URL/internal/reply`), and a fresh one-time bearer capability scoped to that request.
 3. The Grok Bot agent `POST`s `{ correlationId, text }` back to the bridge.
 4. The bridge posts `text` to the matching Discord channel/thread (same ~1900 split as the OpenAI path).
 
@@ -159,7 +165,7 @@ Then fill in:
 
 - `GROK_BOT_TOKEN` — bearer from that computer's `gateway.json` (treat like a password). Grok Bot computers commonly store this at `/home/box/sand-data/gateway.json`; use whatever path that computer actually uses.
 - `GROK_BOT_AGENT_ID` — from `POST /api/listAgents` on the gateway. Do not hardcode a real id in this repo.
-- `BRIDGE_REPLY_TOKEN` — generate a random secret (`openssl rand -hex 32` or equivalent). Do not commit it.
+- `BRIDGE_REPLY_TOKEN` — generate a random server-side key (`openssl rand -hex 32` or equivalent). It is not sent in prompts. Do not commit it.
 - Discord allowlists (`DISCORD_ALLOWED_USERS` / roles / guilds, or DMs). Keep the Discord application **private**.
 
 **Run**
@@ -194,7 +200,7 @@ In this host-process mode, **never** expose `:1340` or `:8788` beyond localhost.
 ## Security
 
 - **Never commit** `.env`, tokens, or API keys. `.gitignore` excludes `.env` and `*.log`.
-- Treat `GROK_BOT_TOKEN` and `BRIDGE_REPLY_TOKEN` like passwords. Do not log them.
+- Treat `GROK_BOT_TOKEN` and `BRIDGE_REPLY_TOKEN` like passwords. The bridge keeps `BRIDGE_REPLY_TOKEN` server-side and sends only per-request callback capabilities. Do not log them.
 - `POST /internal/reply` is authenticated and fail-closed (missing/wrong token → 401). It is not a public webhook.
 - In colocated mode, bind the callback to `127.0.0.1` and do not expose `:1340` or `:8788` beyond localhost.
 - Keep the Discord application **private** until you trust your allowlists.
