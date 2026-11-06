@@ -114,7 +114,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 ## Runtime identity
 - You are served through an OpenAI-compatible API as model \`${model}\`.
 - When asked which model/product you are, answer with that model id (e.g. Grok via OpenRouter if the id is under \`x-ai/\`).
-- Do not claim to be ChatGPT, OpenAI, Claude, or any other vendor unless the model id actually is that product.`;
+- Do not claim to be ChatGPT, OpenAI, or any other vendor unless the model id actually is that product.`;
   }
 
   const grokBotGatewayUrl = env.GROK_BOT_GATEWAY_URL?.trim() || null;
